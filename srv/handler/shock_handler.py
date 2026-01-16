@@ -5,18 +5,19 @@ from loguru import logger
 import time, asyncio, math, json
 
 from ..connector.ycy_ble import YCYBLEConnector
+import srv  # For dynamic wave access
 
 
 class ShockHandler(BaseHandler):
     def __init__(self, SETTINGS: dict, channel_name: str) -> None:
         self.SETTINGS = SETTINGS
         self.channel = channel_name.upper()
-        self.shock_settings = SETTINGS['dglab3'][f'channel_{channel_name.lower()}']
+        self.channel_key = f'channel_{channel_name.lower()}'
+        self.shock_settings = SETTINGS['dglab3'][self.channel_key]
         self.mode_config    = self.shock_settings['mode_config']
 
         self.shock_mode = self.shock_settings['mode']
-        # 强度软上限 (0-200)
-        self.strength_limit = self.shock_settings.get('strength_limit', 200)
+        # 初始强度上限 (运行时通过 property 动态读取)
         logger.info(f"[ShockHandler] Channel {self.channel} initialized with strength_limit = {self.strength_limit}")
 
         if self.shock_mode == 'distance':
@@ -35,7 +36,17 @@ class ShockHandler(BaseHandler):
 
         self.to_clear_time    = 0
         self.is_cleared       = True
-    
+
+    @property
+    def strength_limit(self) -> int:
+        """动态读取强度上限，支持运行时修改"""
+        return self.SETTINGS['dglab3'][self.channel_key].get('strength_limit', 200)
+
+    @property
+    def current_wave(self) -> str:
+        """动态读取当前波形，支持运行时修改"""
+        return srv.DEFAULT_WAVE
+
     def start_background_jobs(self):
         # logger.info(f"Channel: {self.channel}, background job started.")
         asyncio.ensure_future(self.clear_check())
@@ -129,20 +140,22 @@ class ShockHandler(BaseHandler):
             last_strength = current_strength
             await YCYBLEConnector.broadcast_wave(self.channel, wavestr=wave, strength_limit=self.strength_limit)
 
-    async def send_shock_wave(self, shock_time, shockwave: str):
+    async def send_shock_wave(self, shock_time):
+        """发送电击波形，使用动态波形设置"""
+        shockwave = self.current_wave  # 使用动态波形
         shockwave_duration = (shockwave.count(',')+1) * 0.1
         send_times = math.ceil(shock_time // shockwave_duration)
         for _ in range(send_times):
-            await YCYBLEConnector.broadcast_wave(self.channel, wavestr=self.mode_config['shock']['wave'], strength_limit=self.strength_limit)
+            await YCYBLEConnector.broadcast_wave(self.channel, wavestr=self.current_wave, strength_limit=self.strength_limit)
             await asyncio.sleep(shockwave_duration)
-    
+
     async def handler_shock(self, distance):
         current_time = time.time()
         if distance > self.mode_config['trigger_range']['bottom'] and current_time > self.to_clear_time:
             shock_duration = self.mode_config['shock']['duration']
             await self.set_clear_after(shock_duration)
-            logger.success(f'Channel {self.channel}: Shocking for {shock_duration} s.')
-            asyncio.create_task(self.send_shock_wave(shock_duration, self.mode_config['shock']['wave']))
+            logger.success(f'Channel {self.channel}: Shocking for {shock_duration} s, wave: {self.current_wave[:30]}...')
+            asyncio.create_task(self.send_shock_wave(shock_duration))
 
     async def handler_touch(self, distance):
         await self.set_clear_after(0.5)

@@ -240,8 +240,9 @@ def get_conns():
 
 @app.route('/sendwav')
 async def sendwav():
+    """测试端点：发送当前选中的波形"""
     strength_limit = SETTINGS['dglab3']['channel_a'].get('strength_limit', 200)
-    await YCYBLEConnector.broadcast_wave(channel='A', wavestr=srv.waveData[0], strength_limit=strength_limit)
+    await YCYBLEConnector.broadcast_wave(channel='A', wavestr=srv.DEFAULT_WAVE, strength_limit=strength_limit)
     return 'OK'
 
 @app.after_request
