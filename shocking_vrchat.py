@@ -30,19 +30,28 @@ class ChannelTimeManager:
         self.current_strength = {'A': 0, 'B': 0}  # 当前强度
         self._running = False
 
-    async def set_strength_for_duration(self, channel: str, strength: int, duration_ms: int):
-        """设置强度并在指定时间后自动清除 - 时间叠加模式"""
+    async def set_strength_for_duration(self, channel: str, strength: int, duration_ms: int, reset: bool = False):
+        """设置强度并在指定时间后自动清除
+
+        Args:
+            channel: 通道 A 或 B
+            strength: 强度 (0-200)
+            duration_ms: 持续时间 (毫秒)
+            reset: True=重置队列时间, False=叠加队列时间
+        """
         channel = channel.upper()
         now = time.time()
         duration_sec = duration_ms / 1000.0
 
-        # 时间叠加：如果当前还有剩余时间，在其基础上增加
-        if self.clear_time[channel] > now:
-            # 还有剩余时间，叠加
-            self.clear_time[channel] += duration_sec
-        else:
-            # 已过期或首次，从现在开始
+        if reset:
+            # 重置模式：直接覆盖时间
             self.clear_time[channel] = now + duration_sec
+        else:
+            # 叠加模式：如果当前还有剩余时间，在其基础上增加
+            if self.clear_time[channel] > now:
+                self.clear_time[channel] += duration_sec
+            else:
+                self.clear_time[channel] = now + duration_sec
 
         self.current_strength[channel] = strength
 
@@ -356,12 +365,12 @@ async def api_v1_shock(channel, second):
     second = min(second, 10.0)
     duration_ms = int(second * 1000)
 
-    # 使用时间管理器设置强度
+    # 使用时间管理器设置强度 (reset=True: 重置队列而非叠加)
     for chan in channels:
         config_channel = f'channel_{chan.lower()}'
         strength_limit = SETTINGS['dglab3'][config_channel].get('strength_limit', 200)
-        await channel_manager.set_strength_for_duration(chan, strength_limit, duration_ms)
-        logger.success(f'[API][shock] Channel {chan}: 强度 {strength_limit}, 持续 {second}s')
+        await channel_manager.set_strength_for_duration(chan, strength_limit, duration_ms, reset=True)
+        logger.success(f'[API][shock] Channel {chan}: 强度 {strength_limit}, 持续 {second}s (队列重置)')
 
     return {'result': 'OK'}
 
@@ -433,15 +442,110 @@ def get_config():
 
 @app.route('/api/v1/config', methods=['POST'])
 def update_config():
-    # TODO: Hot apply settings
-    err = {
-        'success': False,
-        'message': "Some error",
-    }
+    """更新配置 (通用接口)"""
+    data = request.get_json()
+    if not data:
+        return {'success': False, 'message': 'No JSON data'}, 400
+
+    updated = []
+
+    # 更新 strength_limit
+    if 'strength_limit' in data:
+        for channel, value in data['strength_limit'].items():
+            channel_key = f'channel_{channel.lower()}'
+            if channel_key in SETTINGS['dglab3']:
+                value = max(0, min(200, int(value)))
+                SETTINGS['dglab3'][channel_key]['strength_limit'] = value
+                SETTINGS_BASIC['dglab3'][channel_key]['strength_limit'] = value
+                updated.append(f'{channel}_strength_limit={value}')
+
+    # 更新 wave_index
+    if 'wave_index' in data:
+        idx = int(data['wave_index'])
+        if 0 <= idx < len(srv.waveData):
+            srv.DEFAULT_WAVE = srv.waveData[idx]
+            updated.append(f'wave_index={idx}')
+
+    # 更新自定义波形
+    if 'custom_wave' in data:
+        srv.DEFAULT_WAVE = data['custom_wave']
+        updated.append('custom_wave=set')
+
     return {
         'success': True,
-        'need_restart': False,
-        'message': "Some Message, like, Please restart."
+        'updated': updated,
+        'message': f'Updated: {", ".join(updated)}' if updated else 'No changes'
+    }
+
+@app.route('/api/v1/config/strength/<channel>/<int:value>', methods=['PUT', 'POST'])
+def update_strength_limit(channel, value):
+    """动态更新通道软上限
+
+    Args:
+        channel: A, B, 或 AB (同时更新两个通道)
+        value: 0-200
+    """
+    channel = channel.upper()
+    value = max(0, min(200, value))
+
+    channels = ['A', 'B'] if channel == 'AB' else [channel]
+    updated = []
+
+    for chan in channels:
+        channel_key = f'channel_{chan.lower()}'
+        if channel_key in SETTINGS['dglab3']:
+            SETTINGS['dglab3'][channel_key]['strength_limit'] = value
+            SETTINGS_BASIC['dglab3'][channel_key]['strength_limit'] = value
+            updated.append(chan)
+            logger.info(f'[Config] Channel {chan} strength_limit updated to {value}')
+
+    if not updated:
+        return {'success': False, 'message': f'Invalid channel: {channel}'}, 400
+
+    return {
+        'success': True,
+        'channels': updated,
+        'strength_limit': value
+    }
+
+@app.route('/api/v1/config/wave', methods=['GET'])
+def get_wave_config():
+    """获取波形配置"""
+    return {
+        'presets': srv.waveData,
+        'current': srv.DEFAULT_WAVE,
+        'current_index': srv.waveData.index(srv.DEFAULT_WAVE) if srv.DEFAULT_WAVE in srv.waveData else -1
+    }
+
+@app.route('/api/v1/config/wave/<int:index>', methods=['PUT', 'POST'])
+def set_wave_preset(index):
+    """设置波形预设
+
+    Args:
+        index: 波形预设索引 (0-2)
+    """
+    if 0 <= index < len(srv.waveData):
+        srv.DEFAULT_WAVE = srv.waveData[index]
+        logger.info(f'[Config] Wave preset set to index {index}')
+        return {
+            'success': True,
+            'index': index,
+            'wave': srv.DEFAULT_WAVE
+        }
+    return {'success': False, 'message': f'Invalid index: {index}, max: {len(srv.waveData)-1}'}, 400
+
+@app.route('/api/v1/config/wave/custom', methods=['PUT', 'POST'])
+def set_custom_wave():
+    """设置自定义波形"""
+    data = request.get_json()
+    if not data or 'wave' not in data:
+        return {'success': False, 'message': 'Missing wave data'}, 400
+
+    srv.DEFAULT_WAVE = data['wave']
+    logger.info(f'[Config] Custom wave set: {data["wave"][:50]}...')
+    return {
+        'success': True,
+        'wave': srv.DEFAULT_WAVE
     }
 
 async def send_osc_status():
