@@ -17,6 +17,7 @@ class ShockHandler(BaseHandler):
         self.shock_mode = self.shock_settings['mode']
         # 强度软上限 (0-200)
         self.strength_limit = self.shock_settings.get('strength_limit', 200)
+        logger.info(f"[ShockHandler] Channel {self.channel} initialized with strength_limit = {self.strength_limit}")
 
         if self.shock_mode == 'distance':
             self._handler = self.handler_distance

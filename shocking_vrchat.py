@@ -15,9 +15,57 @@ from srv.handler.machine_handler import TuyaHandler, TuYaConnection
 
 from pythonosc.osc_server import AsyncIOOSCUDPServer
 from pythonosc.dispatcher import Dispatcher
+from pythonosc.udp_client import SimpleUDPClient
 
 # 全局 BLE 连接器实例
 ble_connector: YCYBLEConnector = None
+# OSC 输出客户端 (用于向 VRChat 发送设备状态)
+osc_client: SimpleUDPClient = None
+
+# 通道时间管理器 (BLE 模式下模拟波形队列)
+class ChannelTimeManager:
+    """管理每个通道的强度和清除时间 - 模拟波形队列"""
+    def __init__(self):
+        self.clear_time = {'A': 0, 'B': 0}  # 清除时间
+        self.current_strength = {'A': 0, 'B': 0}  # 当前强度
+        self._running = False
+
+    async def set_strength_for_duration(self, channel: str, strength: int, duration_ms: int):
+        """设置强度并在指定时间后自动清除 - 时间叠加模式"""
+        channel = channel.upper()
+        now = time.time()
+        duration_sec = duration_ms / 1000.0
+
+        # 时间叠加：如果当前还有剩余时间，在其基础上增加
+        if self.clear_time[channel] > now:
+            # 还有剩余时间，叠加
+            self.clear_time[channel] += duration_sec
+        else:
+            # 已过期或首次，从现在开始
+            self.clear_time[channel] = now + duration_sec
+
+        self.current_strength[channel] = strength
+
+        # 设置强度
+        await YCYBLEConnector.broadcast_strength(channel, strength)
+
+    async def clear_check_loop(self):
+        """后台任务：检查并清除过期的强度"""
+        self._running = True
+        while self._running:
+            await asyncio.sleep(0.05)  # 50ms 检查间隔
+            now = time.time()
+            for channel in ['A', 'B']:
+                if self.current_strength[channel] > 0 and now > self.clear_time[channel]:
+                    await YCYBLEConnector.broadcast_strength(channel, 0)
+                    logger.info(f'[TimeManager] Channel {channel}: 队列结束，强度归零')
+                    self.current_strength[channel] = 0
+
+    def stop(self):
+        self._running = False
+
+# 全局时间管理器
+channel_manager = ChannelTimeManager()
 
 app = Flask(__name__)
 
@@ -135,6 +183,10 @@ SETTINGS = {
     'osc':{
         'listen_host': '127.0.0.1',
         'listen_port': 9001,
+        'output_host': '127.0.0.1',
+        'output_port': 9000,
+        'output_param_prefix': '/avatar/parameters/ShockingVRChat',
+        'output_enabled': True,
     },
     'web_server':{
         'listen_host': '127.0.0.1',
@@ -167,31 +219,7 @@ def web_index():
 @app.route("/status")
 def web_status():
     """显示 BLE 连接状态"""
-    global ble_connector
-    if ble_connector and ble_connector.connected:
-        strength = ble_connector.strength_data
-        return f"""
-        <html>
-        <head><title>Shocking VRChat - BLE Mode</title></head>
-        <body>
-        <h1>BLE 连接状态: 已连接</h1>
-        <p>设备地址: {ble_connector.device_address}</p>
-        <p>通道 A 强度: {strength.a if strength else 'N/A'}</p>
-        <p>通道 B 强度: {strength.b if strength else 'N/A'}</p>
-        <p><a href="/api/v1/status">API 状态</a></p>
-        </body>
-        </html>
-        """
-    else:
-        return """
-        <html>
-        <head><title>Shocking VRChat - BLE Mode</title></head>
-        <body>
-        <h1>BLE 连接状态: 未连接</h1>
-        <p>请检查设备是否开启并在范围内</p>
-        </body>
-        </html>
-        """
+    return render_template('status.html')
 
 @app.route('/conns')
 def get_conns():
@@ -203,7 +231,8 @@ def get_conns():
 
 @app.route('/sendwav')
 async def sendwav():
-    await YCYBLEConnector.broadcast_wave(channel='A', wavestr=srv.waveData[0])
+    strength_limit = SETTINGS['dglab3']['channel_a'].get('strength_limit', 200)
+    await YCYBLEConnector.broadcast_wave(channel='A', wavestr=srv.waveData[0], strength_limit=strength_limit)
     return 'OK'
 
 @app.after_request
@@ -244,57 +273,109 @@ def allow_vrchat_only(func):
 
 @app.route('/api/v1/status')
 async def api_v1_status():
+    """完全兼容原版 API 格式"""
     global ble_connector
     devices = []
+
     if ble_connector and ble_connector.connected:
         strength = ble_connector.strength_data
+        # 基于 MAC 地址生成 UUID 格式
+        mac = ble_connector.device_address or '00:00:00:00:00:00'
+        mac_hex = mac.replace(':', '').lower()
+        # 填充为 UUID 格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        device_uuid = f"{mac_hex[:8]}-{mac_hex[8:12] if len(mac_hex) > 8 else '0000'}-4000-8000-{mac_hex.zfill(12)}"
+
+        devices.append({
+            "type": 'shock',
+            'device': 'coyotev3',
+            'attr': {
+                'strength': {
+                    'A': strength.a if strength else 0,
+                    'B': strength.b if strength else 0
+                },
+                'uuid': device_uuid
+            }
+        })
+
+    return {
+        'healthy': 'ok',
+        'devices': devices
+    }
+
+
+@app.route('/api/v1/status/detail')
+async def api_v1_status_detail():
+    """详细状态 API (扩展)"""
+    global ble_connector
+    devices = []
+
+    if ble_connector and ble_connector.connected:
+        strength = ble_connector.strength_data
+        battery = -1
+        electrode_a = 'unknown'
+        electrode_b = 'unknown'
+        try:
+            battery = await ble_connector.get_battery()
+            electrode_a = await ble_connector.get_electrode_status('A')
+            electrode_b = await ble_connector.get_electrode_status('B')
+        except Exception:
+            pass
+
         devices.append({
             "type": 'shock',
             'device': 'ycy_ble',
             'attr': {
-                'address': ble_connector.device_address,
                 'strength_a': strength.a if strength else 0,
                 'strength_b': strength.b if strength else 0,
-                'connected': True
+                'uuid': ble_connector.device_address or 'ble-device',
+                'battery': battery,
+                'electrode_a': electrode_a,
+                'electrode_b': electrode_b,
             }
         })
+
     return {
         'healthy': 'ok',
-        'mode': 'ble',
+        'connected': ble_connector.connected if ble_connector else False,
         'devices': devices
     }
 
 @app.route('/api/v1/shock/<channel>/<second>', endpoint='api_v1_shock')
 @allow_vrchat_only
 async def api_v1_shock(channel, second):
+    """BLE 模式下的电击 API - 使用时间管理器"""
     if channel == 'all':
         channels = ['A', 'B']
     else:
-        channels = [channel]
-    try: 
+        channels = [channel.upper()]
+    try:
         second = float(second)
     except Exception:
         logger.warning('[API][shock] Invalid second, set to 1.')
         second = 1.0
     second = min(second, 10.0)
-    repeat = int(10 * second)
-    for _ in range(repeat // 10):
-        for chan in channels:
-            await api_v1_sendwave(chan, 10, '0A0A0A0A64646464')
-    if repeat % 10 > 0:
-        for chan in channels:
-            await api_v1_sendwave(chan, repeat % 10, '0A0A0A0A64646464')
+    duration_ms = int(second * 1000)
+
+    # 使用时间管理器设置强度
+    for chan in channels:
+        config_channel = f'channel_{chan.lower()}'
+        strength_limit = SETTINGS['dglab3'][config_channel].get('strength_limit', 200)
+        await channel_manager.set_strength_for_duration(chan, strength_limit, duration_ms)
+        logger.success(f'[API][shock] Channel {chan}: 强度 {strength_limit}, 持续 {second}s')
+
     return {'result': 'OK'}
 
 @app.route('/api/v1/sendwave/<channel>/<repeat>/<wavedata>', endpoint='api_v1_sendwave')
 @allow_vrchat_only
 async def api_v1_sendwave(channel, repeat, wavedata):
-    """API V1 Sendwave.
+    """API V1 Sendwave (BLE 模式).
 
     Keyword arguments:
     channel -- A or B.
     repeat -- repeat times, 1 for 100ms, 1 to 80. Max 80 for json length limit.
     wavedata -- Coyote v3 wave format, eg. 0A0A0A0A64646464.
+
+    BLE 模式: 解析波形强度，设置强度并持续 repeat*100ms
     """
     try:
         channel = channel.upper()
@@ -316,10 +397,23 @@ async def api_v1_sendwave(channel, repeat, wavedata):
     except:
         logger.warning('[API][sendwave] Invalid wave, set to 0A0A0A0A64646464.')
         wavedata = '0A0A0A0A64646464'
-    wavestr = [wavedata for _ in range(repeat)]
-    wavestr = json.dumps(wavestr, separators=(',', ':'))
-    logger.success(f'[API][sendwave] C:{channel} R:{repeat} W:{wavedata}')
-    await YCYBLEConnector.broadcast_wave(channel=channel, wavestr=wavestr)
+
+    # 解析波形强度 (最后2个hex字符)
+    strength_percent = int(wavedata[-2:], 16)  # 0-100
+
+    # 获取通道的 strength_limit
+    config_channel = f'channel_{channel.lower()}'
+    strength_limit = SETTINGS['dglab3'][config_channel].get('strength_limit', 200)
+
+    # 计算实际强度
+    actual_strength = int(strength_percent * strength_limit / 100)
+    duration_ms = repeat * 100
+
+    logger.success(f'[API][sendwave] C:{channel} 强度:{strength_percent}% -> {actual_strength}/{strength_limit}, 持续:{duration_ms}ms')
+
+    # 使用时间管理器 (支持队列叠加)
+    await channel_manager.set_strength_for_duration(channel, actual_strength, duration_ms)
+
     return {'result': 'OK'}
 
 def strip_basic_settings(settings: dict):
@@ -350,8 +444,48 @@ def update_config():
         'message': "Some Message, like, Please restart."
     }
 
+async def send_osc_status():
+    """定期发送设备状态到 VRChat"""
+    global osc_client, ble_connector
+
+    osc_config = SETTINGS.get('osc', {})
+    if not osc_config.get('output_enabled', True):
+        return
+
+    prefix = osc_config.get('output_param_prefix', '/avatar/parameters/ShockingVRChat')
+    last_connected = None
+
+    while True:
+        await asyncio.sleep(0.5)  # 每 0.5 秒检查一次
+
+        if not osc_client:
+            continue
+
+        try:
+            connected = ble_connector.connected if ble_connector else False
+
+            # 只在状态变化时发送，或者每 5 秒发送一次
+            if connected != last_connected:
+                osc_client.send_message(f"{prefix}/Connected", connected)
+                logger.info(f"OSC 发送设备状态: Connected = {connected}")
+                last_connected = connected
+        except Exception as e:
+            logger.debug(f"OSC 发送状态失败: {e}")
+
+
 async def async_main():
-    global ble_connector
+    global ble_connector, osc_client
+
+    # 初始化 OSC 输出客户端
+    osc_config = SETTINGS.get('osc', {})
+    if osc_config.get('output_enabled', True):
+        osc_client = SimpleUDPClient(
+            osc_config.get('output_host', '127.0.0.1'),
+            osc_config.get('output_port', 9000)
+        )
+        logger.success(f"OSC 输出已启用: {osc_config.get('output_host')}:{osc_config.get('output_port')}")
+        # 启动状态发送任务
+        asyncio.create_task(send_osc_status())
 
     # 初始化 BLE 连接
     ble_config = SETTINGS.get('ble', {})
@@ -369,6 +503,10 @@ async def async_main():
     # 启动后台任务
     for handler in handlers:
         handler.start_background_jobs()
+
+    # 启动 API 时间管理器
+    asyncio.create_task(channel_manager.clear_check_loop())
+    logger.success("API 时间管理器已启动")
 
     # 启动 OSC 服务器
     try:
@@ -423,9 +561,12 @@ def config_init():
     SERVER_IP = SETTINGS.get('SERVER_IP') or get_current_ip()
 
     for chann in ['channel_a', 'channel_b']:
-        SETTINGS['dglab3'][chann]['avatar_params'] = SETTINGS_BASIC['dglab3'][chann]['avatar_params']
-        SETTINGS['dglab3'][chann]['mode'] = SETTINGS_BASIC['dglab3'][chann]['mode']
-        SETTINGS['dglab3'][chann]['strength_limit'] = SETTINGS_BASIC['dglab3'][chann]['strength_limit']
+        SETTINGS['dglab3'][chann]['avatar_params'] = SETTINGS_BASIC['dglab3'][chann].get('avatar_params', [])
+        SETTINGS['dglab3'][chann]['mode'] = SETTINGS_BASIC['dglab3'][chann].get('mode', 'distance')
+        # 确保 strength_limit 有默认值
+        raw_limit = SETTINGS_BASIC['dglab3'][chann].get('strength_limit')
+        SETTINGS['dglab3'][chann]['strength_limit'] = raw_limit if raw_limit is not None else 200
+        logger.info(f"[Config] {chann}: strength_limit from file = {raw_limit}, using = {SETTINGS['dglab3'][chann]['strength_limit']}")
 
     logger.remove()
     logger.add(sys.stderr, level=SETTINGS['log_level'])
@@ -440,10 +581,12 @@ def main():
     for chann in ['A', 'B']:
         config_chann_name = f'channel_{chann.lower()}'
         chann_mode = SETTINGS['dglab3'][config_chann_name]['mode']
+        chann_strength_limit = SETTINGS['dglab3'][config_chann_name].get('strength_limit', 200)
         shock_handler = ShockHandler(SETTINGS=SETTINGS, channel_name=chann)
         handlers.append(shock_handler)
+        logger.success(f"Channel {chann} Mode: {chann_mode}, Strength Limit: {chann_strength_limit}")
         for param in SETTINGS['dglab3'][config_chann_name]['avatar_params']:
-            logger.success(f"Channel {chann} Mode：{chann_mode} Listening：{param}")
+            logger.success(f"  Listening: {param}")
             dispatcher.map(param, shock_handler.osc_handler)
     
     if 'machine' in SETTINGS and 'tuya' in SETTINGS['machine']:

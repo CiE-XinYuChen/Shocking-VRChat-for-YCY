@@ -41,11 +41,12 @@ class YCYBLEConnector:
         self.client: Optional[YCYBLEClient] = None
         self._reconnect_task: Optional[asyncio.Task] = None
         self._auto_reconnect = True
+        self._connected_flag = False  # 连接成功标记
 
     @property
     def connected(self) -> bool:
-        """是否已连接"""
-        return self.client is not None and self.client.connected
+        """是否已连接 - 使用连接成功标记"""
+        return self._connected_flag and self.client is not None
 
     @property
     def strength_data(self):
@@ -94,6 +95,8 @@ class YCYBLEConnector:
             # 连接
             success = await self.client.connect()
             if success:
+                # 设置连接标记
+                self._connected_flag = True
                 # 更新全局引用
                 srv.BLE_CLIENT = self.client
 
@@ -106,6 +109,7 @@ class YCYBLEConnector:
 
                 return True
             else:
+                self._connected_flag = False
                 logger.error("BLE 连接失败")
                 return False
 
@@ -116,6 +120,7 @@ class YCYBLEConnector:
     async def disconnect(self):
         """断开连接"""
         self._auto_reconnect = False
+        self._connected_flag = False
         if self._reconnect_task:
             self._reconnect_task.cancel()
 
@@ -129,6 +134,37 @@ class YCYBLEConnector:
         if self.connected:
             return True
         return await self.connect()
+
+    async def get_battery(self) -> int:
+        """获取电池电量"""
+        if not self.connected or not self.client:
+            return -1
+        try:
+            return await self.client.get_battery()
+        except Exception:
+            return -1
+
+    async def get_electrode_status(self, channel: str) -> str:
+        """
+        获取电极状态
+
+        :return: 'not_connected' | 'connected_active' | 'connected_inactive' | 'unknown'
+        """
+        if not self.connected or not self.client:
+            return 'disconnected'
+        try:
+            from pydglab_ws.ble import ElectrodeStatus
+            ch = Channel.A if channel.upper() == 'A' else Channel.B
+            status = await self.client.get_electrode_status(ch)
+            if status == ElectrodeStatus.NOT_CONNECTED:
+                return 'not_connected'
+            elif status == ElectrodeStatus.CONNECTED_ACTIVE:
+                return 'connected_active'
+            elif status == ElectrodeStatus.CONNECTED_INACTIVE:
+                return 'connected_inactive'
+            return 'unknown'
+        except Exception:
+            return 'unknown'
 
     # ==================== 兼容原 DGConnection 的静态方法 ====================
 
@@ -183,7 +219,9 @@ class YCYBLEConnector:
 
             # 设置强度
             await client.set_strength(ch, StrengthOperationType.SET_TO, ycy_strength)
-            logger.debug(f"Channel {channel}: 强度 {strength_percent}% -> {ycy_strength}/{strength_limit}")
+            # 使用 info 级别日志方便调试
+            if ycy_strength > 0:
+                logger.info(f"Channel {channel}: 强度 {strength_percent}% -> {ycy_strength}/{strength_limit}")
         except Exception as e:
             logger.error(f"设置强度失败: {e}")
 

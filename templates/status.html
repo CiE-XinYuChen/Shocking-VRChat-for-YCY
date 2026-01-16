@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shocking VRChat - BLE Status</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+        .container { max-width: 600px; margin: 0 auto; }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            color: #e94560;
+        }
+        .card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            backdrop-filter: blur(10px);
+        }
+        .card-title {
+            font-size: 0.9em;
+            color: #888;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .status-row:last-child { border-bottom: none; }
+        .status-label { color: #aaa; }
+        .status-value { font-weight: bold; }
+        .status-connected { color: #4ade80; }
+        .status-disconnected { color: #f87171; }
+        .strength-bar {
+            width: 100%;
+            height: 24px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        .strength-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4ade80, #e94560);
+            border-radius: 12px;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 8px;
+            font-size: 12px;
+            min-width: 30px;
+        }
+        .channel-box {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .channel {
+            flex: 1;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+        }
+        .channel-label {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .channel-a .channel-label { color: #60a5fa; }
+        .channel-b .channel-label { color: #f472b6; }
+        .refresh-info {
+            text-align: center;
+            color: #666;
+            font-size: 0.8em;
+            margin-top: 20px;
+        }
+        .electrode-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+        }
+        .electrode-active { background: #4ade80; color: #000; }
+        .electrode-inactive { background: #fbbf24; color: #000; }
+        .electrode-disconnected { background: #f87171; color: #fff; }
+        .electrode-unknown { background: #6b7280; color: #fff; }
+        .config-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .config-title {
+            font-size: 0.8em;
+            color: #888;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Shocking VRChat - BLE</h1>
+
+        <div class="card">
+            <div class="card-title">Connection Status</div>
+            <div class="status-row">
+                <span class="status-label">BLE Device</span>
+                <span id="conn-status" class="status-value status-disconnected">Checking...</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Device Address</span>
+                <span id="device-addr" class="status-value">-</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Battery</span>
+                <span id="battery" class="status-value">-</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Channels</div>
+            <div class="channel-box">
+                <div class="channel channel-a">
+                    <div class="channel-label">Channel A</div>
+                    <div class="strength-bar">
+                        <div id="strength-a" class="strength-fill" style="width: 0%">0</div>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 0.85em;">
+                        Electrode: <span id="electrode-a" class="electrode-status electrode-unknown">-</span>
+                    </div>
+                    <div class="config-section">
+                        <div class="config-title">Config</div>
+                        <div style="font-size: 0.85em;">
+                            Mode: <span id="mode-a">-</span><br>
+                            Limit: <span id="limit-a">-</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="channel channel-b">
+                    <div class="channel-label">Channel B</div>
+                    <div class="strength-bar">
+                        <div id="strength-b" class="strength-fill" style="width: 0%">0</div>
+                    </div>
+                    <div style="margin-top: 8px; font-size: 0.85em;">
+                        Electrode: <span id="electrode-b" class="electrode-status electrode-unknown">-</span>
+                    </div>
+                    <div class="config-section">
+                        <div class="config-title">Config</div>
+                        <div style="font-size: 0.85em;">
+                            Mode: <span id="mode-b">-</span><br>
+                            Limit: <span id="limit-b">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">API Endpoints</div>
+            <div class="status-row">
+                <span class="status-label">Status API</span>
+                <a href="/api/v1/status" style="color: #60a5fa;">/api/v1/status</a>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Config API</span>
+                <a href="/api/v1/config" style="color: #60a5fa;">/api/v1/config</a>
+            </div>
+        </div>
+
+        <div class="refresh-info">
+            Auto-refresh every 1 second | <span id="last-update">-</span>
+        </div>
+    </div>
+
+    <script>
+        async function fetchStatus() {
+            try {
+                // 使用详细 API
+                const res = await fetch('/api/v1/status/detail');
+                const data = await res.json();
+
+                const connEl = document.getElementById('conn-status');
+                const addrEl = document.getElementById('device-addr');
+                const battEl = document.getElementById('battery');
+
+                if (data.connected && data.devices && data.devices.length > 0) {
+                    const dev = data.devices[0];
+                    connEl.textContent = 'Connected';
+                    connEl.className = 'status-value status-connected';
+                    addrEl.textContent = dev.attr.uuid || '-';
+
+                    const batt = dev.attr.battery;
+                    battEl.textContent = batt >= 0 ? batt + '%' : '-';
+
+                    // Strength
+                    const strA = dev.attr.strength_a || 0;
+                    const strB = dev.attr.strength_b || 0;
+                    updateStrength('a', strA);
+                    updateStrength('b', strB);
+
+                    // Electrode status
+                    updateElectrode('a', dev.attr.electrode_a);
+                    updateElectrode('b', dev.attr.electrode_b);
+                } else {
+                    connEl.textContent = 'Disconnected';
+                    connEl.className = 'status-value status-disconnected';
+                    addrEl.textContent = '-';
+                    battEl.textContent = '-';
+                    updateStrength('a', 0);
+                    updateStrength('b', 0);
+                    updateElectrode('a', 'disconnected');
+                    updateElectrode('b', 'disconnected');
+                }
+
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error('Fetch error:', e);
+            }
+        }
+
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/v1/config');
+                const data = await res.json();
+
+                if (data.basic?.dglab3) {
+                    const chA = data.basic.dglab3.channel_a;
+                    const chB = data.basic.dglab3.channel_b;
+
+                    document.getElementById('mode-a').textContent = chA?.mode || '-';
+                    document.getElementById('limit-a').textContent = chA?.strength_limit || '-';
+                    document.getElementById('mode-b').textContent = chB?.mode || '-';
+                    document.getElementById('limit-b').textContent = chB?.strength_limit || '-';
+                }
+            } catch (e) {
+                console.error('Config fetch error:', e);
+            }
+        }
+
+        function updateStrength(channel, value) {
+            const el = document.getElementById('strength-' + channel);
+            const pct = Math.min(100, (value / 200) * 100);
+            el.style.width = Math.max(pct, 5) + '%';
+            el.textContent = value;
+        }
+
+        function updateElectrode(channel, status) {
+            const el = document.getElementById('electrode-' + channel);
+            el.textContent = status || '-';
+            el.className = 'electrode-status ';
+            if (status === 'connected_active') {
+                el.className += 'electrode-active';
+                el.textContent = 'Active';
+            } else if (status === 'connected_inactive') {
+                el.className += 'electrode-inactive';
+                el.textContent = 'Inactive';
+            } else if (status === 'not_connected' || status === 'disconnected') {
+                el.className += 'electrode-disconnected';
+                el.textContent = 'No Electrode';
+            } else {
+                el.className += 'electrode-unknown';
+            }
+        }
+
+        // Initial fetch
+        fetchStatus();
+        fetchConfig();
+
+        // Auto-refresh
+        setInterval(fetchStatus, 1000);
+    </script>
+</body>
+</html>
