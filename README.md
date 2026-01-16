@@ -1,32 +1,81 @@
-# Shocking VRChat
+# Shocking VRChat for YCY (BLE 直连版)
 
 [English version](README_en.md)
 
-一个小工具，通过接受 VRChat Avatar 的 OSC 消息，使用 Websocket 协议联动郊狼 DG-LAB 3.0 ，达到游戏中Avatar被别人/自己触摸，就会被郊狼电的效果。
+一个小工具，通过接受 VRChat Avatar 的 OSC 消息，**使用蓝牙 BLE 直接连接役次元 (YCY) 设备**，达到游戏中 Avatar 被别人/自己触摸，就会被电的效果。
+
+> [!NOTE]
+> **本版本为 BLE 直连版**，无需手机 APP 中转，直接通过电脑蓝牙连接役次元设备。
+>
+> 原版 WebSocket 版本请访问：[VRChatNext/Shocking-VRChat](https://github.com/VRChatNext/Shocking-VRChat)
 
 我们的 VRChat 群组： [ShockingVRC https://vrc.group/SHOCK.2911](https://vrc.group/SHOCK.2911)
 
 > [!CAUTION]
 > 您必须阅读并同意 [安全须知](doc/dglab/安全须知.md) ([Safety Precautions](doc/dglab/SafetyPrecautions.md) in English) 后才可以使用本工具！
 
+## 与原版的区别
+
+| 特性 | 原版 (WebSocket) | 本版本 (BLE 直连) |
+|------|------------------|-------------------|
+| 连接方式 | 手机 APP 扫码 → WebSocket | 电脑蓝牙直连设备 |
+| 需要手机 | 是 | 否 |
+| 支持设备 | 郊狼 DG-LAB 3.0 | 役次元 (YCY) |
+| 波形控制 | 自定义波形队列 | 强度控制 + 时间队列 |
+| 延迟 | 较高 (网络+APP) | 较低 (BLE 直连) |
+
 ## 使用方式
 
-1. 前往 [本项目Release](https://github.com/VRChatNext/Shocking-VRChat/releases) 下载最新版本的 Shocking-VRChat 工具
-2. 首次运行 exe 程序，将会在当前目录生成设置文件并退出。
-3. 在配置文件 `settings-v*.*.yaml` 中填入 `avatar_params` 与工作模式（shock/distance）。
-4. （可选）按需修改进阶配置文件 `settings-advanced-v*.*.yaml` 内容，参数含义请查看进阶配置文件参考。
-4. 重新运行本程序，请确认是否弹出了 Windows 防火墙安全警告，如弹出请选择允许，以接受郊狼 APP 被控连接。
-5. 启动 DG-LAB 3.0 APP，使用 Socket 控制功能扫描弹出窗口的二维码。
-6. 享受 VRChat！
+1. 确保电脑有蓝牙功能，并已开启
+2. 开启役次元设备，确保设备处于可被发现状态
+3. 首次运行程序，将会在当前目录生成设置文件并退出
+4. 在配置文件 `settings-v*.*.yaml` 中填入 `avatar_params` 与工作模式（shock/distance/touch）
+5. （可选）按需修改进阶配置文件 `settings-advanced-v*.*.yaml`
+6. 重新运行程序，程序将自动扫描并连接役次元设备
+7. 看到 `BLE 连接成功!` 后即可开始使用
+8. 访问 `http://127.0.0.1:8800/status` 查看实时状态
+
+## BLE 连接说明
+
+- 程序启动时会自动扫描附近的役次元设备
+- 默认扫描超时时间为 10 秒
+- 如需指定设备地址，可在进阶配置文件中设置 `ble.device_address`
+- 连接成功后，设备地址会显示在日志中
+
+## 波形队列与时间管理 (BLE 模式)
+
+由于 BLE 直连模式无法像 WebSocket 版本那样发送自定义波形队列，本版本采用**强度控制 + 时间队列**的方式模拟波形效果：
+
+### 工作原理
+
+1. **强度映射**：将原版波形数据中的强度值 (0-100) 映射到设备强度 (0-200)
+2. **时间队列**：每个波形包代表 100ms，多个包的时间会叠加
+3. **自动清除**：队列时间结束后，强度自动归零
+
+### 示例
+
+```
+API 调用: /api/v1/sendwave/A/10/0A0A0A0A64646464
+- 通道: A
+- 重复: 10 次 = 1000ms
+- 波形: 0A0A0A0A64646464 (强度 0x64 = 100%)
+- 结果: 设置 A 通道强度为 100 (受 strength_limit 限制)，1 秒后自动归零
+```
+
+### 时间叠加
+
+连续调用 API 时，时间会叠加而非覆盖：
+- 第一次调用 `sendwave/A/10/...` → A 通道 1000ms 后清除
+- 立即第二次调用 `sendwave/A/5/...` → A 通道再延长 500ms，共 1500ms 后清除
 
 ## 工作模式解释
 
 ### distance 距离模式
 
-- 根据与触发区域中心的距离控制波形强度
+- 根据与触发区域中心的距离控制强度
 - 越接近中心，强度越强
 - 距离模式下 trigger_range 的含义
-    - 当接收到的 OSC 数据大于 bottom 时，开始线性变化波形强度，上界为 top
+    - 当接收到的 OSC 数据大于 bottom 时，开始线性变化强度，上界为 top
     - 当数据达到或超过 top 参数后，以最大强度输出
     - 建议 bottom 设置为 0 或较小数字
     - 建议 top 设置为 1.0 以获得最大动态范围
@@ -38,6 +87,11 @@
 - 电击模式下 trigger_range 的含义
     - 当接收到的 OSC 数据大于 bottom 时，触发电击
     - top 参数在 shock 模式被忽略
+
+### touch 触摸模式
+
+- 根据触摸速度/加速度控制强度
+- 支持多种导数模式 (距离、速度、加速度、加加速度)
 
 
 ## 基础配置文件参考
@@ -105,68 +159,86 @@ version: v0.2
 ## 进阶配置文件参考
 
 ```yaml
-SERVER_IP: null # 为 null 时程序将尝试自动获取本机 IP，如果获取错误，请将null修改为正确的 IP 地址（手机可以访问到电脑的 IP ，通常为有线网络或 WiFi ）
+ble: # BLE 连接配置 (本版本新增)
+  device_address: null  # 设备蓝牙地址，留空则自动扫描
+  scan_timeout: 10.0    # 扫描超时时间（秒）
+  strength_limit: 200   # 全局强度上限 (0-200)
+
 dglab3:
   channel_a: # 通道 A 配置
     mode_config:   # 工作模式配置
       distance:
-      # 该项目下的参数仅对 distance 距离模式生效
-        freq_ms: 10 
-        # 生成波形的频率（间隔毫秒），推荐 10 
-        # 详细请参考 DG-LAB-OPENSOURCE 蓝牙协议V3 的波形部分
+        freq_ms: 10  # 强度更新频率（毫秒）
       shock:
-      # 该项目下的参数仅对 shock 电击模式生效
-        duration: 2
-        # 触发后的电击时长
-        wave: '["0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464"]'
-        # 电击波形
+        duration: 2  # 触发后的电击时长
+        wave: '["0A0A0A0A64646464"]'  # 电击波形 (BLE 模式下仅解析强度)
+      touch:
+        freq_ms: 10
+        n_derivative: 1  # 0=距离, 1=速度, 2=加速度, 3=加加速度
+        derivative_params:
+          - {top: 1, bottom: 0}
+          - {top: 5, bottom: 0}
+          - {top: 50, bottom: 0}
+          - {top: 500, bottom: 0}
       trigger_range:
-      # 触发阈值设置，对所有模式生效，范围 0 ~ 1
-        bottom: 0.0 # OSC 回报参数触发下界（低于视为 0%）
-        top: 0.8    # OSC 回报参数触发上界（超过视为 100%）
+        bottom: 0.0  # OSC 回报参数触发下界
+        top: 0.8     # OSC 回报参数触发上界
   channel_b: # 通道 B 配置，参数设置与 A 通道相同
     mode_config:
       distance:
         freq_ms: 10
       shock:
         duration: 2
-        wave: '["0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464","0A0A0A0A64646464"]'
+        wave: '["0A0A0A0A64646464"]'
+      touch:
+        freq_ms: 10
+        n_derivative: 1
+        derivative_params:
+          - {top: 1, bottom: 0}
+          - {top: 5, bottom: 0}
+          - {top: 50, bottom: 0}
+          - {top: 500, bottom: 0}
       trigger_range:
         bottom: 0.1
         top: 0.8
-general: # 通用配置
-  auto_open_qr_web_page: true # 程序启动时自动开启扫码 Web 页面
-  local_ip_detect:  # 探测本地 IP 时使用的服务器地址
-    host: 223.5.5.5 # 默认为 AliDNS 如果在中国大陆以外使用，请适当修改
-    port: 80
-log_level: INFO # 日志等级，诊断问题时可以改为 DEBUG
-osc: # OSC 服务配置
-  listen_host: 127.0.0.1 # 如果 VRChat 在其他主机运行，请改为 0.0.0.0，并给 VRChat 正确配置 osc 启动命令行参数。
-  listen_port: 9001
-version: v0.2 # 配置文件版本
-web_server: # Web 服务器配置
-  listen_host: 127.0.0.1 # 如果需要从其他主机打开网页扫码，请改为 0.0.0.0
-  listen_port: 8800
-ws: # Websocket 服务配置
-  listen_host: 0.0.0.0
-  listen_port: 28846
-  master_uuid: 6da2fd3b-a6e5-4af4-afc1-96bfd2e9e95c # 首次启动自动随机生成
 
+general: # 通用配置
+  auto_open_qr_web_page: false  # BLE 模式不需要二维码
+  local_ip_detect:
+    host: 223.5.5.5
+    port: 80
+
+log_level: INFO  # 日志等级，诊断问题时可以改为 DEBUG
+
+osc: # OSC 服务配置
+  listen_host: 127.0.0.1
+  listen_port: 9001
+  # OSC 输出配置 (向 VRChat 发送设备状态)
+  output_host: 127.0.0.1
+  output_port: 9000
+  output_param_prefix: /avatar/parameters/ShockingVRChat
+  output_enabled: true
+
+web_server: # Web 服务器配置
+  listen_host: 127.0.0.1
+  listen_port: 8800
+
+version: v0.2
 ```
 
 ## FAQ
 
 ### 是否有逃生通道
 
-- 有，可以按一下郊狼的任意一侧肩键按钮，此时 A B 通道强度会被设置为 0。
-- 当程序检测到通道强度被用户主动设置为 0 后，将不再自动跟随强度上限。
-- 还原需要手动在手机上点击 "+" 键，将通道强度 +1 ，即恢复自动跟随。
+- 有，可以按一下设备的物理按钮，此时 A B 通道强度会被设置为 0。
+- 也可以直接关闭程序或关闭设备电源。
+- BLE 直连模式下，关闭程序后设备会立即停止输出。
 
 ### 应该如何设置上限
 
-- 建议通过郊狼 APP 内的被控设置进行调整，程序将跟随。
-- `settings-v*.*.yaml` 基础配置文件内的 `strength_limit` 也会限制强度上限，如果超过默认值 100，需要调整该参数。
-- 为保证强度自动跟随自动运行，请确认郊狼APP内 菜单-被控设置 中，两个通道的强度上限初始值（最小值）大于等于 1。
+- **BLE 版本使用 `strength_limit` 配置**：在 `settings-v*.*.yaml` 基础配置文件中，每个通道可以独立设置 `strength_limit` (0-200)。
+- 默认值为 100，如需更高强度请调整此参数。
+- 也可在进阶配置文件中设置 `ble.strength_limit` 作为全局上限。
 
 ### 想用一个参数同时触发两个通道
 
@@ -204,10 +276,11 @@ targets:
 
 *以后使用时只执行步骤 7 即可，如果只用面捕也需要启动 `osc-repeater`
 
-### 控制台内有波形输出，但是没有强度或强度显著变小
+### 控制台内有输出，但是没有强度或强度显著变小
 
 - 确认贴片正常连接，确认电线正常连接
-- 试试看按一下按钮将郊狼强度设置为 0 之后，再手动点击屏幕 +1 恢复正常模式。
+- 检查 `strength_limit` 配置是否设置过低
+- 访问 `http://127.0.0.1:8800/status` 查看设备电极连接状态
 
 ### 程序看起来收不到 OSC 数据
 
@@ -219,16 +292,23 @@ targets:
 
 ### 为什么强度一直是最大可用值
 
-- 程序运行后会自动跟随郊狼APP内设置的上限并与基础配置文件内 `strength_limit` 取一最小值设置为最大强度。
-- 程序使用波形信号控制强度，即便您看到的强度达到了上限，但实际被触发的强度是由触发实体（例如他人的手）距离触发区域（例如 enterPass）中心点的距离决定，线性提升。
+- **BLE 版本**：强度由基础配置文件内的 `strength_limit` 控制，程序会根据触发距离在 0 到 `strength_limit` 之间线性变化。
+- 实际被触发的强度是由触发实体（例如他人的手）距离触发区域（例如 enterPass）中心点的距离决定，线性提升。
 - 如需修改判定上下界请用 `trigger_range` 配置。
 
-### APP 扫码无法连接/连接超时
+### BLE 扫描找不到设备
 
-1. 请确认手机和电脑在同一个网络内，例如手机不可以使用流量。
-2. 请检查二维码网页上显示的IP地址，例如 ws://192.168.1.2:28846/ ，该IP是否为你的网卡IP。
-3. 如果IP错误，请在进阶配置文件中 `SERVER_IP:` 填写正确的 IP 地址后重启程序再试。
-4. 请确认 Windows 防火墙是否允许本程序访问网络（接受传入连接）。
+1. 确认设备已开机并处于可被发现状态（通常设备指示灯会闪烁）
+2. 确认电脑蓝牙已开启
+3. 尝试增加扫描超时时间：在进阶配置文件中设置 `ble.scan_timeout` 为更大的值（默认 10 秒）
+4. 如果知道设备地址，可在进阶配置文件中设置 `ble.device_address` 直接连接
+5. 关闭其他可能占用蓝牙的程序后重试
+
+### BLE 连接不稳定/断开重连
+
+1. 确保设备与电脑距离较近（建议 3 米以内）
+2. 避免蓝牙信号被遮挡（如金属物体）
+3. 程序会自动尝试重连，如果频繁断开，检查设备电量
 
 ### 程序版本更新后配置文件如何继承？
 
@@ -242,6 +322,10 @@ targets:
 ## Credits
 
 感谢 [DG-LAB-OPENSOURCE](https://github.com/DG-LAB-OPENSOURCE/DG-LAB-OPENSOURCE) ，赞美 DG-LAB 的开源精神！
+
+感谢 [PyDGLab-WS-for-YCY](https://github.com/CiE-XinYuChen/PyDGLab-WS-for-YCY) 提供的役次元设备 BLE 连接支持！
+
+感谢原版 [VRChatNext/Shocking-VRChat](https://github.com/VRChatNext/Shocking-VRChat) 项目！
 
 感谢以下用户对常见参数部分的协助：ichiAkagi
 
