@@ -7,15 +7,17 @@ import traceback
 import copy
 
 from flask import Flask, render_template, redirect, request, jsonify
-from websockets.server import serve as wsserve
 
 import srv
-from srv.connector.coyotev3ws import DGWSMessage, DGConnection
+from srv.connector.ycy_ble import YCYBLEConnector
 from srv.handler.shock_handler import ShockHandler
 from srv.handler.machine_handler import TuyaHandler, TuYaConnection
 
 from pythonosc.osc_server import AsyncIOOSCUDPServer
 from pythonosc.dispatcher import Dispatcher
+
+# 全局 BLE 连接器实例
+ble_connector: YCYBLEConnector = None
 
 app = Flask(__name__)
 
@@ -49,6 +51,11 @@ SETTINGS_BASIC = {
 }
 SETTINGS = {
     'SERVER_IP': None,
+    'ble': {
+        'device_address': None,  # 留空则自动扫描
+        'scan_timeout': 10.0,
+        'strength_limit': 200,
+    },
     'dglab3': {
         'channel_a': {
             'mode_config':{
@@ -125,11 +132,6 @@ SETTINGS = {
             }
         },
     },
-    'ws':{
-        'master_uuid': None,
-        'listen_host': '0.0.0.0',
-        'listen_port': 28846 
-    },
     'osc':{
         'listen_host': '127.0.0.1',
         'listen_port': 9001,
@@ -141,7 +143,7 @@ SETTINGS = {
     'log_level': 'INFO',
     'version': CONFIG_FILE_VERSION,
     'general': {
-        'auto_open_qr_web_page': True,
+        'auto_open_qr_web_page': False,  # BLE 模式不需要二维码
         'local_ip_detect': {
             'host': '223.5.5.5',
             'port': 80,
@@ -160,19 +162,48 @@ def get_current_ip():
 
 @app.route("/")
 def web_index():
-    return redirect("/qr", code=302)
+    return redirect("/status", code=302)
 
-@app.route("/qr")
-def web_qr():
-    return render_template('tiny-qr.html', content=f'https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#ws://{SERVER_IP}:{SETTINGS["ws"]["listen_port"]}/{SETTINGS["ws"]["master_uuid"]}')
+@app.route("/status")
+def web_status():
+    """显示 BLE 连接状态"""
+    global ble_connector
+    if ble_connector and ble_connector.connected:
+        strength = ble_connector.strength_data
+        return f"""
+        <html>
+        <head><title>Shocking VRChat - BLE Mode</title></head>
+        <body>
+        <h1>BLE 连接状态: 已连接</h1>
+        <p>设备地址: {ble_connector.device_address}</p>
+        <p>通道 A 强度: {strength.a if strength else 'N/A'}</p>
+        <p>通道 B 强度: {strength.b if strength else 'N/A'}</p>
+        <p><a href="/api/v1/status">API 状态</a></p>
+        </body>
+        </html>
+        """
+    else:
+        return """
+        <html>
+        <head><title>Shocking VRChat - BLE Mode</title></head>
+        <body>
+        <h1>BLE 连接状态: 未连接</h1>
+        <p>请检查设备是否开启并在范围内</p>
+        </body>
+        </html>
+        """
 
 @app.route('/conns')
 def get_conns():
-    return str(srv.WS_CONNECTIONS)
+    """获取连接状态"""
+    global ble_connector
+    if ble_connector and ble_connector.connected:
+        return f"BLE connected: {ble_connector.device_address}"
+    return "BLE not connected"
 
 @app.route('/sendwav')
 async def sendwav():
-    await DGConnection.broadcast_wave(channel='A', wavestr=srv.waveData[0])
+    await YCYBLEConnector.broadcast_wave(channel='A', wavestr=srv.waveData[0])
     return 'OK'
 
 @app.after_request
@@ -213,12 +244,24 @@ def allow_vrchat_only(func):
 
 @app.route('/api/v1/status')
 async def api_v1_status():
+    global ble_connector
+    devices = []
+    if ble_connector and ble_connector.connected:
+        strength = ble_connector.strength_data
+        devices.append({
+            "type": 'shock',
+            'device': 'ycy_ble',
+            'attr': {
+                'address': ble_connector.device_address,
+                'strength_a': strength.a if strength else 0,
+                'strength_b': strength.b if strength else 0,
+                'connected': True
+            }
+        })
     return {
         'healthy': 'ok',
-        'devices': [
-            *[{"type": 'shock', 'device':'coyotev3', 'attr': {'strength':conn.strength, 'uuid':conn.uuid}} for conn in srv.WS_CONNECTIONS],
-            *[{"type": 'machine', 'device':'tuya', 'attr': {}} for conn in []], # TODO
-        ]
+        'mode': 'ble',
+        'devices': devices
     }
 
 @app.route('/api/v1/shock/<channel>/<second>', endpoint='api_v1_shock')
@@ -276,7 +319,7 @@ async def api_v1_sendwave(channel, repeat, wavedata):
     wavestr = [wavedata for _ in range(repeat)]
     wavestr = json.dumps(wavestr, separators=(',', ':'))
     logger.success(f'[API][sendwave] C:{channel} R:{repeat} W:{wavedata}')
-    await DGConnection.broadcast_wave(channel=channel, wavestr=wavestr)
+    await YCYBLEConnector.broadcast_wave(channel=channel, wavestr=wavestr)
     return {'result': 'OK'}
 
 def strip_basic_settings(settings: dict):
@@ -307,33 +350,46 @@ def update_config():
         'message': "Some Message, like, Please restart."
     }
 
-async def wshandler(connection):
-    client = DGConnection(connection, SETTINGS=SETTINGS)
-    await client.serve()
-
 async def async_main():
+    global ble_connector
+
+    # 初始化 BLE 连接
+    ble_config = SETTINGS.get('ble', {})
+    ble_connector = YCYBLEConnector(
+        device_address=ble_config.get('device_address'),
+        strength_limit=ble_config.get('strength_limit', 200)
+    )
+
+    # 连接 BLE 设备
+    scan_timeout = ble_config.get('scan_timeout', 10.0)
+    if not await ble_connector.connect(timeout=scan_timeout):
+        logger.error("BLE 设备连接失败，请确保设备已开启并在范围内")
+        logger.error("程序将继续运行，等待设备连接...")
+
+    # 启动后台任务
     for handler in handlers:
         handler.start_background_jobs()
-    try: 
+
+    # 启动 OSC 服务器
+    try:
         server = AsyncIOOSCUDPServer((SETTINGS["osc"]["listen_host"], SETTINGS["osc"]["listen_port"]), dispatcher, asyncio.get_event_loop())
         logger.success(f'OSC Listening: {SETTINGS["osc"]["listen_host"]}:{SETTINGS["osc"]["listen_port"]}')
         transport, protocol = await server.create_serve_endpoint()
-        # await wsserve(wshandler, "127.0.0.1", 8765)
     except Exception as e:
         logger.error(traceback.format_exc())
         logger.error("OSC UDP Recevier listen failed.")
         logger.error("OSC监听失败，可能存在端口冲突")
         return
-    try: 
-        async with wsserve(wshandler, SETTINGS['ws']["listen_host"], SETTINGS['ws']["listen_port"]):
-            await asyncio.Future()  # run forever
-    except Exception as e:
-        logger.error(traceback.format_exc())
-        logger.error("Websocket server listen failed.")
-        logger.error("WS服务监听失败，可能存在端口冲突")
-        return
 
-    transport.close()
+    # 保持运行
+    try:
+        await asyncio.Future()  # run forever
+    except asyncio.CancelledError:
+        pass
+    finally:
+        transport.close()
+        if ble_connector:
+            await ble_connector.disconnect()
 
 def async_main_wrapper():
     """Not async Wrapper around async_main to run it as target function of Thread"""
@@ -352,7 +408,6 @@ def config_init():
     logger.info(f'Init settings..., Config filename: {CONFIG_FILENAME_BASIC} {CONFIG_FILENAME}, Config version: {CONFIG_FILE_VERSION}.')
     global SETTINGS, SETTINGS_BASIC, SERVER_IP
     if not (os.path.exists(CONFIG_FILENAME) and os.path.exists(CONFIG_FILENAME_BASIC)):
-        SETTINGS['ws']['master_uuid'] = str(uuid.uuid4())
         config_save()
         raise ConfigFileInited()
 
@@ -364,10 +419,8 @@ def config_init():
     if SETTINGS.get('version', None) != CONFIG_FILE_VERSION or SETTINGS_BASIC.get('version', None) != CONFIG_FILE_VERSION:
         logger.error(f"Configuration file version mismatch! Please delete the {CONFIG_FILENAME_BASIC} and {CONFIG_FILENAME} files and run the program again to generate the latest version of the configuration files.")
         raise Exception(f'配置文件版本不匹配！请删除 {CONFIG_FILENAME_BASIC} {CONFIG_FILENAME} 文件后再次运行程序，以生成最新版本的配置文件。')
-    if SETTINGS['ws']['master_uuid'] is None:
-        SETTINGS['ws']['master_uuid'] = str(uuid.uuid4())
-        config_save()
-    SERVER_IP = SETTINGS['SERVER_IP'] or get_current_ip()
+
+    SERVER_IP = SETTINGS.get('SERVER_IP') or get_current_ip()
 
     for chann in ['channel_a', 'channel_b']:
         SETTINGS['dglab3'][chann]['avatar_params'] = SETTINGS_BASIC['dglab3'][chann]['avatar_params']
@@ -376,8 +429,8 @@ def config_init():
 
     logger.remove()
     logger.add(sys.stderr, level=SETTINGS['log_level'])
-    logger.success("The configuration file initialization is complete. The WebSocket service needs to listen for incoming connections. If a firewall prompt appears, please click Allow Access.")
-    logger.success("配置文件初始化完成，Websocket服务需要监听外来连接，如弹出防火墙提示，请点击允许访问。")
+    logger.success("Configuration initialized. BLE mode enabled - will scan for YCY device.")
+    logger.success("配置文件初始化完成，BLE 模式已启用 - 将扫描役次元设备。")
 
 def main():
     global dispatcher, handlers
@@ -387,7 +440,7 @@ def main():
     for chann in ['A', 'B']:
         config_chann_name = f'channel_{chann.lower()}'
         chann_mode = SETTINGS['dglab3'][config_chann_name]['mode']
-        shock_handler = ShockHandler(SETTINGS=SETTINGS, DG_CONN = DGConnection, channel_name=chann)
+        shock_handler = ShockHandler(SETTINGS=SETTINGS, channel_name=chann)
         handlers.append(shock_handler)
         for param in SETTINGS['dglab3'][config_chann_name]['avatar_params']:
             logger.success(f"Channel {chann} Mode：{chann_mode} Listening：{param}")

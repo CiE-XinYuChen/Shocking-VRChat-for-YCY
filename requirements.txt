@@ -1,7 +1,11 @@
 flask
 flask[async]
 loguru
-websockets
 python-osc
 pyyaml
+numpy
+bleak>=0.21.0
+pydantic>=2.0.0
 tuya-connector-python
+# 安装本地 pydglab_ws_ycy 包:
+# pip install pydglab_ws_ycy-1.2.0-py3-none-any.whl

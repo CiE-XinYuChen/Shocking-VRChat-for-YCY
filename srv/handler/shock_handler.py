@@ -4,19 +4,20 @@ from .base_handler import BaseHandler
 from loguru import logger
 import time, asyncio, math, json
 
-from ..connector.coyotev3ws import DGConnection
+from ..connector.ycy_ble import YCYBLEConnector
 
 
 class ShockHandler(BaseHandler):
-    def __init__(self, SETTINGS: dict, DG_CONN: DGConnection, channel_name: str) -> None:
+    def __init__(self, SETTINGS: dict, channel_name: str) -> None:
         self.SETTINGS = SETTINGS
-        self.DG_CONN = DG_CONN
         self.channel = channel_name.upper()
         self.shock_settings = SETTINGS['dglab3'][f'channel_{channel_name.lower()}']
         self.mode_config    = self.shock_settings['mode_config']
 
         self.shock_mode = self.shock_settings['mode']
-        
+        # 强度软上限 (0-200)
+        self.strength_limit = self.shock_settings.get('strength_limit', 200)
+
         if self.shock_mode == 'distance':
             self._handler = self.handler_distance
         elif self.shock_mode == 'shock':
@@ -25,7 +26,7 @@ class ShockHandler(BaseHandler):
             self._handler = self.handler_touch
         else:
             raise ValueError(f"Not supported mode: {self.shock_mode}")
-        
+
         self.bg_wave_update_time_window = 0.1
         self.bg_wave_current_strength = 0
 
@@ -47,7 +48,8 @@ class ShockHandler(BaseHandler):
     def osc_handler(self, address, *args):
         logger.debug(f"VRCOSC: CHANN {self.channel}: {address}: {args}")
         val = self.param_sanitizer(args)
-        return asyncio.ensure_future(self._handler(val))
+        asyncio.ensure_future(self._handler(val))
+        # 不返回 Task，避免 pythonosc 解析错误
 
     async def clear_check(self):
         # logger.info(f'Channel {self.channel} started clear check.')
@@ -60,7 +62,7 @@ class ShockHandler(BaseHandler):
                 self.is_cleared = True
                 self.bg_wave_current_strength = 0
                 self.touch_dist_arr.clear()
-                await self.DG_CONN.broadcast_clear_wave(self.channel)
+                await YCYBLEConnector.broadcast_clear_wave(self.channel)
                 logger.info(f'Channel {self.channel}, wave cleared after timeout.')
     
     async def feed_wave(self):
@@ -69,7 +71,7 @@ class ShockHandler(BaseHandler):
         sleep_time = 1
         while 1:
             await asyncio.sleep(sleep_time)
-            await self.DG_CONN.broadcast_wave(channel=self.channel, wavestr=self.shock_settings['shock_wave'])
+            await YCYBLEConnector.broadcast_wave(channel=self.channel, wavestr=self.shock_settings['shock_wave'])
 
     async def set_clear_after(self, val):
         self.is_cleared = False
@@ -122,15 +124,15 @@ class ShockHandler(BaseHandler):
                 last_strength, 
                 current_strength
             )
-            logger.success(f'Channel {self.channel}, strength {last_strength:.3f} to {current_strength:.3f}, Sending {wave}')
+            logger.success(f'Channel {self.channel}, strength {last_strength:.3f} to {current_strength:.3f}, limit {self.strength_limit}')
             last_strength = current_strength
-            await self.DG_CONN.broadcast_wave(self.channel, wavestr=wave)
-    
+            await YCYBLEConnector.broadcast_wave(self.channel, wavestr=wave, strength_limit=self.strength_limit)
+
     async def send_shock_wave(self, shock_time, shockwave: str):
         shockwave_duration = (shockwave.count(',')+1) * 0.1
         send_times = math.ceil(shock_time // shockwave_duration)
         for _ in range(send_times):
-            await self.DG_CONN.broadcast_wave(self.channel, wavestr=self.mode_config['shock']['wave'])
+            await YCYBLEConnector.broadcast_wave(self.channel, wavestr=self.mode_config['shock']['wave'], strength_limit=self.strength_limit)
             await asyncio.sleep(shockwave_duration)
     
     async def handler_shock(self, distance):
@@ -191,7 +193,7 @@ class ShockHandler(BaseHandler):
                 last_strength, 
                 current_strength
             )
-            logger.success(f'Channel {self.channel}, strength {last_strength:.3f} to {current_strength:.3f}, Sending {wave}')
+            logger.success(f'Channel {self.channel}, strength {last_strength:.3f} to {current_strength:.3f}, limit {self.strength_limit}')
             last_strength = current_strength
-            # await self.DG_CONN.broadcast_wave(self.channel, wavestr=wave)
+            await YCYBLEConnector.broadcast_wave(self.channel, wavestr=wave, strength_limit=self.strength_limit)
 
