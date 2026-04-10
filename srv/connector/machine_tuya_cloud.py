@@ -1,10 +1,13 @@
 import time
 from loguru import logger
-from tuya_connector import (
-	TuyaOpenAPI,
-	TuyaOpenPulsar,
-	TuyaCloudPulsarTopic,
-)
+try:
+    from tuya_connector import (
+        TuyaOpenAPI,
+        TuyaOpenPulsar,
+        TuyaCloudPulsarTopic,
+    )
+except ImportError:
+    TuyaOpenAPI = TuyaOpenPulsar = TuyaCloudPulsarTopic = None
 
 class TuYaConnection():
     def __init__(
